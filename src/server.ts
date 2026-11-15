@@ -1,6 +1,6 @@
-import app from "./app";
-import { connectDatabase } from "./config/database";
-import { env } from "./config/env";
+import app from "./app.js";
+import { connectDatabase } from "./config/database.js";
+import { env } from "./config/env.js";
 import dns from "node:dns";
 
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
