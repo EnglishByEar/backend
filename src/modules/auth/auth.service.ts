@@ -6,6 +6,8 @@ import {
   generateAccessToken,
   generateRefreshToken,
   hashToken,
+  verifyRefreshToken,
+  getTokenExpirationDate,
 } from "./auth.tokens.js";
 
 const SALT_ROUNDS = 12;
@@ -62,11 +64,9 @@ export async function registerUser(input: RegisterInput) {
   }
 }
 
-
 export async function loginUser(email: string, password: string) {
   const user = await User.findOne({ email }).select("+password");
 
-  // Use the same error for unknown email and incorrect password.
   if (!user || !user.isActive) {
     throw new AuthError("Invalid email or password", 401);
   }
@@ -85,14 +85,10 @@ export async function loginUser(email: string, password: string) {
   const accessToken = generateAccessToken(userId);
   const refreshToken = generateRefreshToken(userId);
 
-  const refreshExpiresAt = new Date(
-    Date.now() + 7 * 24 * 60 * 60 * 1000
-  );
-
   await Session.create({
     userId: user._id,
     refreshTokenHash: hashToken(refreshToken),
-    expiresAt: refreshExpiresAt,
+    expiresAt: getTokenExpirationDate(refreshToken),
   });
 
   return {
@@ -104,4 +100,48 @@ export async function loginUser(email: string, password: string) {
     accessToken,
     refreshToken,
   };
+}
+
+
+export async function refreshUser(refreshToken: string) {
+  let payload;
+
+  try {
+    payload = verifyRefreshToken(refreshToken);
+  } catch {
+    throw new AuthError("Invalid or expired refresh token", 401);
+  }
+
+  const newRefreshToken = generateRefreshToken(payload.sub!);
+  const newAccessToken = generateAccessToken(payload.sub!);
+
+  const session = await Session.findOneAndUpdate(
+    {
+      userId: payload.sub,
+      refreshTokenHash: hashToken(refreshToken),
+      expiresAt: { $gt: new Date() },
+    },
+    {
+      $set: {
+        refreshTokenHash: hashToken(newRefreshToken),
+        expiresAt: getTokenExpirationDate(newRefreshToken),
+      },
+    },
+    { new: true }
+  );
+
+  if (!session) {
+    throw new AuthError("Session is invalid or expired", 401);
+  }
+
+  return {
+    accessToken: newAccessToken,
+    refreshToken: newRefreshToken,
+  };
+}
+
+export async function logoutUser(refreshToken: string) {
+  await Session.deleteOne({
+    refreshTokenHash: hashToken(refreshToken),
+  });
 }
