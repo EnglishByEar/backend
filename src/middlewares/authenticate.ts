@@ -45,8 +45,9 @@ export const authenticate: RequestHandler = async (
       });
       return;
     }
-
-    const user = await User.findById(decoded.sub).select("_id isActive");
+    
+    const user = await User.findById(decoded.sub)
+      .select("_id isActive");
 
     if (!user || !user.isActive) {
       res.status(401).json({
