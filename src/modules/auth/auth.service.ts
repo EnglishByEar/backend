@@ -9,6 +9,7 @@ import {
   verifyRefreshToken,
   getTokenExpirationDate,
 } from "./auth.tokens.js";
+import mongoose from "mongoose";
 
 const SALT_ROUNDS = 12;
 
@@ -110,6 +111,16 @@ export async function refreshUser(refreshToken: string) {
     payload = verifyRefreshToken(refreshToken);
   } catch {
     throw new AuthError("Invalid or expired refresh token", 401);
+  }
+
+  if (!mongoose.isValidObjectId(payload.sub)) {
+    throw new AuthError("Invalid refresh token", 401);
+  }
+
+  const user = await User.findById(payload.sub).select("_id isActive");
+
+  if (!user || !user.isActive) {
+    throw new AuthError("User account is unavailable", 401);
   }
 
   const newRefreshToken = generateRefreshToken(payload.sub!);

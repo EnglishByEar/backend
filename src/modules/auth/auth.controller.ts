@@ -155,19 +155,30 @@ export async function me(
   next: NextFunction
 ) {
   try {
-    const userId = (req as Request & { auth?: { userId: string } }).auth?.userId;
-    const user = await User.findById(userId)
-      .select("name email createdAt");
+    console.log("Authenticated user ID:", req.auth?.userId);
+    const userId = req.auth?.userId;
 
-    if (!user) {
+    if (!userId) {
+      throw new AuthError("Authentication required", 401);
+    }
+
+    const user = await User.findById(userId)
+      .select("name email createdAt isActive");
+
+    if (!user || !user.isActive) {
       throw new AuthError("User not found", 404);
     }
 
     res.status(200).json({
       success: true,
-      user,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        createdAt: user.createdAt,
+      },
     });
   } catch (error) {
-    handleError(error, next);
+    next(error);
   }
 }
