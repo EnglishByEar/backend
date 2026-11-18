@@ -1,11 +1,17 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import { env } from "./config/env.js";
 import authRoutes from "./modules/auth/auth.routes.js";
+import exerciseRoutes from "./modules/exercises/exercise.routes.js";
 import { errorHandler } from "./middlewares/error-handler.js";
 
 const app = express();
+
+app.set("trust proxy", env.TRUST_PROXY);
+
+app.use(helmet());
 
 app.use(
   cors({
@@ -25,6 +31,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.use("/api/auth", authRoutes);
+app.use("/api/exercises", exerciseRoutes);
 
 // 404 handler
 app.use((_req, res) => {
