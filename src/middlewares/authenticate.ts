@@ -1,70 +1,36 @@
-
 import type { RequestHandler } from "express";
-import jwt, { type JwtPayload } from "jsonwebtoken";
+import mongoose from "mongoose";
 
-import { env } from "../config/env.js";
 import { User } from "../modules/auth/auth.model.js";
+import { verifyAccessToken } from "../modules/auth/auth.tokens.js";
+import { AppError } from "../utils/app-error.js";
 
-export const authenticate: RequestHandler = async (
-  req,
-  res,
-  next
-) => {
-  try {
-    const authorization = req.headers.authorization;
+export const authenticate: RequestHandler = async (req, _res, next) => {
+  const authorization = req.headers.authorization;
 
-    if (!authorization?.startsWith("Bearer ")) {
-      res.status(401).json({
-        success: false,
-        message: "Authentication required",
-      });
-      return;
-    }
-
-    const token = authorization.slice(7);
-
-    let decoded: string | JwtPayload;
-
-    try {
-      decoded = jwt.verify(token, env.JWT_ACCESS_SECRET);
-    } catch {
-      res.status(401).json({
-        success: false,
-        message: "Invalid or expired access token",
-      });
-      return;
-    }
-
-    if (
-      typeof decoded === "string" ||
-      typeof decoded.sub !== "string"
-    ) {
-      res.status(401).json({
-        success: false,
-        message: "Invalid access token",
-      });
-      return;
-    }
-    
-    const user = await User.findById(decoded.sub)
-      .select("_id isActive");
-
-    if (!user || !user.isActive) {
-      res.status(401).json({
-        success: false,
-        message: "User account is unavailable",
-      });
-      return;
-    }
-
-    Object.assign(req, {
-      auth: {
-        userId: user._id.toString(),
-      },
-    });
-
-    next();
-  } catch (error) {
-    next(error);
+  if (!authorization?.startsWith("Bearer ")) {
+    throw new AppError("Authentication required", 401);
   }
+
+  let userId: string;
+
+  try {
+    userId = verifyAccessToken(authorization.slice(7)).sub;
+  } catch {
+    throw new AppError("Invalid or expired access token", 401);
+  }
+
+  if (!mongoose.isValidObjectId(userId)) {
+    throw new AppError("Invalid access token", 401);
+  }
+
+  const user = await User.findById(userId).select("_id isActive");
+
+  if (!user || !user.isActive) {
+    throw new AppError("User account is unavailable", 401);
+  }
+
+  req.auth = { userId: user._id.toString() };
+
+  next();
 };
