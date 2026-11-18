@@ -1,4 +1,6 @@
 import bcrypt from "bcryptjs";
+import mongoose from "mongoose";
+import { AppError } from "../../utils/app-error.js";
 import { User } from "./auth.model.js";
 import type { RegisterInput } from "./auth.validation.js";
 import { Session } from "./session.model.js";
@@ -9,19 +11,22 @@ import {
   verifyRefreshToken,
   getTokenExpirationDate,
 } from "./auth.tokens.js";
-import mongoose from "mongoose";
 
 const SALT_ROUNDS = 12;
 
-export class AuthError extends Error {
-  constructor(
-    message: string,
-    public statusCode: number
-  ) {
-    super(message);
-    this.name = "AuthError";
-  }
-}
+/**
+ * Two parallel refreshes (e.g. two browser tabs) legitimately present the same
+ * token within a moment of each other. Inside this window a replayed token is
+ * just rejected; after it, a replay is treated as theft and kills the session.
+ */
+const REUSE_GRACE_MS = 10_000;
+
+// Compared against when the email is unknown, so response time does not reveal
+// whether an account exists.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(
+  "dummy-password-for-timing",
+  SALT_ROUNDS
+);
 
 export async function registerUser(input: RegisterInput) {
   const existingUser = await User.findOne({
@@ -29,13 +34,10 @@ export async function registerUser(input: RegisterInput) {
   });
 
   if (existingUser) {
-    throw new AuthError("Email is already registered", 409);
+    throw new AppError("Email is already registered", 409);
   }
 
-  const hashedPassword = await bcrypt.hash(
-    input.password,
-    SALT_ROUNDS
-  );
+  const hashedPassword = await bcrypt.hash(input.password, SALT_ROUNDS);
 
   try {
     const user = await User.create({
@@ -58,7 +60,7 @@ export async function registerUser(input: RegisterInput) {
       "code" in error &&
       error.code === 11000
     ) {
-      throw new AuthError("Email is already registered", 409);
+      throw new AppError("Email is already registered", 409);
     }
 
     throw error;
@@ -68,28 +70,25 @@ export async function registerUser(input: RegisterInput) {
 export async function loginUser(email: string, password: string) {
   const user = await User.findOne({ email }).select("+password");
 
-  if (!user || !user.isActive) {
-    throw new AuthError("Invalid email or password", 401);
-  }
-
   const isPasswordValid = await bcrypt.compare(
     password,
-    user.password
+    user?.password ?? DUMMY_PASSWORD_HASH
   );
 
-  if (!isPasswordValid) {
-    throw new AuthError("Invalid email or password", 401);
+  if (!user || !user.isActive || !isPasswordValid) {
+    throw new AppError("Invalid email or password", 401);
   }
 
   const userId = user._id.toString();
 
   const accessToken = generateAccessToken(userId);
   const refreshToken = generateRefreshToken(userId);
+  const refreshTokenExpiresAt = getTokenExpirationDate(refreshToken);
 
   await Session.create({
     userId: user._id,
     refreshTokenHash: hashToken(refreshToken),
-    expiresAt: getTokenExpirationDate(refreshToken),
+    expiresAt: refreshTokenExpiresAt,
   });
 
   return {
@@ -100,54 +99,70 @@ export async function loginUser(email: string, password: string) {
     },
     accessToken,
     refreshToken,
+    refreshTokenExpiresAt,
   };
 }
 
-
 export async function refreshUser(refreshToken: string) {
-  let payload;
+  let payload: ReturnType<typeof verifyRefreshToken>;
 
   try {
     payload = verifyRefreshToken(refreshToken);
   } catch {
-    throw new AuthError("Invalid or expired refresh token", 401);
+    throw new AppError("Invalid or expired refresh token", 401);
   }
 
   if (!mongoose.isValidObjectId(payload.sub)) {
-    throw new AuthError("Invalid refresh token", 401);
+    throw new AppError("Invalid refresh token", 401);
   }
 
   const user = await User.findById(payload.sub).select("_id isActive");
 
   if (!user || !user.isActive) {
-    throw new AuthError("User account is unavailable", 401);
+    throw new AppError("User account is unavailable", 401);
   }
 
-  const newRefreshToken = generateRefreshToken(payload.sub!);
-  const newAccessToken = generateAccessToken(payload.sub!);
+  const userId = user._id.toString();
+  const currentHash = hashToken(refreshToken);
+  const now = new Date();
 
+  const newRefreshToken = generateRefreshToken(userId);
+  const newExpiresAt = getTokenExpirationDate(newRefreshToken);
+
+  // Atomic rotation: only one request can swap a given token for a new one.
   const session = await Session.findOneAndUpdate(
     {
-      userId: payload.sub,
-      refreshTokenHash: hashToken(refreshToken),
-      expiresAt: { $gt: new Date() },
+      userId: user._id,
+      refreshTokenHash: currentHash,
+      expiresAt: { $gt: now },
     },
     {
       $set: {
         refreshTokenHash: hashToken(newRefreshToken),
-        expiresAt: getTokenExpirationDate(newRefreshToken),
+        previousRefreshTokenHash: currentHash,
+        rotatedAt: now,
+        expiresAt: newExpiresAt,
       },
     },
-    { new: true }
+    { returnDocument: "after" }
   );
 
   if (!session) {
-    throw new AuthError("Session is invalid or expired", 401);
+    // A correctly signed token with no live session: if it is one that was
+    // already rotated away, someone is replaying it. Revoke that session.
+    await Session.deleteOne({
+      userId: user._id,
+      previousRefreshTokenHash: currentHash,
+      rotatedAt: { $lt: new Date(now.getTime() - REUSE_GRACE_MS) },
+    });
+
+    throw new AppError("Session is invalid or expired", 401);
   }
 
   return {
-    accessToken: newAccessToken,
+    accessToken: generateAccessToken(userId),
     refreshToken: newRefreshToken,
+    refreshTokenExpiresAt: newExpiresAt,
   };
 }
 

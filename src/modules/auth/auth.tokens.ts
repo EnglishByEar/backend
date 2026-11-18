@@ -1,16 +1,15 @@
-
 import jwt, { type JwtPayload, type SignOptions } from "jsonwebtoken";
 import { randomUUID, createHash } from "node:crypto";
 import { env } from "../../config/env.js";
 
+// Pin the algorithm on both sign and verify so a token can never choose its own.
+const ALGORITHM = "HS256" as const;
+
 export function generateAccessToken(userId: string): string {
-  return jwt.sign(
-    { sub: userId },
-    env.JWT_ACCESS_SECRET,
-    {
-      expiresIn: env.JWT_ACCESS_EXPIRES_IN as SignOptions["expiresIn"],
-    }
-  );
+  return jwt.sign({ sub: userId }, env.JWT_ACCESS_SECRET, {
+    algorithm: ALGORITHM,
+    expiresIn: env.JWT_ACCESS_EXPIRES_IN as SignOptions["expiresIn"],
+  });
 }
 
 export function generateRefreshToken(userId: string): string {
@@ -21,19 +20,36 @@ export function generateRefreshToken(userId: string): string {
     },
     env.JWT_REFRESH_SECRET,
     {
+      algorithm: ALGORITHM,
       expiresIn: env.JWT_REFRESH_EXPIRES_IN as SignOptions["expiresIn"],
     }
   );
 }
 
 export function hashToken(token: string): string {
-  return createHash("sha256")
-    .update(token)
-    .digest("hex");
+  return createHash("sha256").update(token).digest("hex");
 }
 
-export function verifyRefreshToken(token: string): JwtPayload {
-  const decoded = jwt.verify(token, env.JWT_REFRESH_SECRET);
+export function verifyAccessToken(token: string): { sub: string } {
+  const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET, {
+    algorithms: [ALGORITHM],
+  });
+
+  if (typeof decoded === "string" || typeof decoded.sub !== "string") {
+    throw new Error("Invalid access token");
+  }
+
+  return { sub: decoded.sub };
+}
+
+export function verifyRefreshToken(token: string): {
+  sub: string;
+  jti: string;
+  exp: number;
+} {
+  const decoded = jwt.verify(token, env.JWT_REFRESH_SECRET, {
+    algorithms: [ALGORITHM],
+  });
 
   if (
     typeof decoded === "string" ||
@@ -44,7 +60,7 @@ export function verifyRefreshToken(token: string): JwtPayload {
     throw new Error("Invalid refresh token");
   }
 
-  return decoded;
+  return { sub: decoded.sub, jti: decoded.jti, exp: decoded.exp };
 }
 
 export function getTokenExpirationDate(token: string): Date {

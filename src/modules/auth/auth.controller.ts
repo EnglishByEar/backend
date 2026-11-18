@@ -1,184 +1,112 @@
-
-import type { Request, Response, NextFunction } from "express";
+import type { Request, Response } from "express";
 import {
   registerUser,
   loginUser,
   refreshUser,
   logoutUser,
-  AuthError,
 } from "./auth.service.js";
-import { registerSchema, loginSchema } from "./auth.validation.js";
+import type { RegisterInput, LoginInput } from "./auth.validation.js";
 import { User } from "./auth.model.js";
 import { env } from "../../config/env.js";
+import { AppError } from "../../utils/app-error.js";
+
+// Express 5 forwards errors from async handlers to the error middleware,
+// so no try/catch is needed here. Request bodies are validated in the routes.
 
 const COOKIE_NAME = "refreshToken";
 
-const cookieOptions = {
+const baseCookieOptions = {
   httpOnly: true,
   secure: env.NODE_ENV === "production",
   sameSite: "lax" as const,
   path: "/api/auth",
-  maxAge: 7 * 24 * 60 * 60 * 1000,
 };
 
-function handleError(
-  error: unknown,
-  next: NextFunction
-) {
-  next(error);
+function setRefreshCookie(res: Response, token: string, expires: Date) {
+  // Expiry comes from the token itself, so cookie and JWT can never disagree.
+  res.cookie(COOKIE_NAME, token, { ...baseCookieOptions, expires });
 }
 
-export async function register(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
-  try {
-    const result = registerSchema.safeParse(req.body);
+export async function register(req: Request, res: Response) {
+  const user = await registerUser(req.body as RegisterInput);
 
-    if (!result.success) {
-      res.status(400).json({
-        success: false,
-        errors: result.error.issues,
-      });
-      return;
-    }
-
-    const user = await registerUser(result.data);
-
-    res.status(201).json({
-      success: true,
-      message: "Account created successfully",
-      user,
-    });
-  } catch (error) {
-    handleError(error, next);
-  }
+  res.status(201).json({
+    success: true,
+    message: "Account created successfully",
+    user,
+  });
 }
 
-export async function login(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
-  try {
-    const result = loginSchema.safeParse(req.body);
+export async function login(req: Request, res: Response) {
+  const { email, password } = req.body as LoginInput;
 
-    if (!result.success) {
-      res.status(400).json({
-        success: false,
-        errors: result.error.issues,
-      });
-      return;
-    }
+  const { user, accessToken, refreshToken, refreshTokenExpiresAt } =
+    await loginUser(email, password);
 
-    const { user, accessToken, refreshToken } =
-      await loginUser(result.data.email, result.data.password);
+  setRefreshCookie(res, refreshToken, refreshTokenExpiresAt);
 
-    res.cookie(COOKIE_NAME, refreshToken, cookieOptions);
-
-    res.status(200).json({
-      success: true,
-      message: "Login successful",
-      user,
-      accessToken,
-    });
-  } catch (error) {
-    handleError(error, next);
-  }
+  res.status(200).json({
+    success: true,
+    message: "Login successful",
+    user,
+    accessToken,
+  });
 }
 
-export async function refresh(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
-  try {
-    const refreshToken = req.cookies?.[COOKIE_NAME];
+export async function refresh(req: Request, res: Response) {
+  const refreshToken = req.cookies?.[COOKIE_NAME];
 
-    if (!refreshToken) {
-      res.status(401).json({
-        success: false,
-        message: "Refresh token is required",
-      });
-      return;
-    }
-
-    const tokens = await refreshUser(refreshToken);
-
-    res.cookie(
-      COOKIE_NAME,
-      tokens.refreshToken,
-      cookieOptions
-    );
-
-    res.status(200).json({
-      success: true,
-      accessToken: tokens.accessToken,
-    });
-  } catch (error) {
-    handleError(error, next);
+  if (!refreshToken) {
+    throw new AppError("Refresh token is required", 401);
   }
+
+  const tokens = await refreshUser(refreshToken);
+
+  setRefreshCookie(res, tokens.refreshToken, tokens.refreshTokenExpiresAt);
+
+  res.status(200).json({
+    success: true,
+    accessToken: tokens.accessToken,
+  });
 }
 
-export async function logout(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
-  try {
-    const refreshToken = req.cookies?.[COOKIE_NAME];
+export async function logout(req: Request, res: Response) {
+  const refreshToken = req.cookies?.[COOKIE_NAME];
 
-    if (refreshToken) {
-      await logoutUser(refreshToken);
-    }
-
-    res.clearCookie(COOKIE_NAME, {
-      httpOnly: true,
-      secure: env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/api/auth",
-    });
-
-    res.status(200).json({
-      success: true,
-      message: "Logged out successfully",
-    });
-  } catch (error) {
-    handleError(error, next);
+  if (refreshToken) {
+    await logoutUser(refreshToken);
   }
+
+  res.clearCookie(COOKIE_NAME, baseCookieOptions);
+
+  res.status(200).json({
+    success: true,
+    message: "Logged out successfully",
+  });
 }
 
-export async function me(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
-  try {
-    console.log("Authenticated user ID:", req.auth?.userId);
-    const userId = req.auth?.userId;
+export async function me(req: Request, res: Response) {
+  const userId = req.auth?.userId;
 
-    if (!userId) {
-      throw new AuthError("Authentication required", 401);
-    }
-
-    const user = await User.findById(userId)
-      .select("name email createdAt isActive");
-
-    if (!user || !user.isActive) {
-      throw new AuthError("User not found", 404);
-    }
-
-    res.status(200).json({
-      success: true,
-      user: {
-        id: user._id.toString(),
-        name: user.name,
-        email: user.email,
-        createdAt: user.createdAt,
-      },
-    });
-  } catch (error) {
-    next(error);
+  if (!userId) {
+    throw new AppError("Authentication required", 401);
   }
+
+  const user = await User.findById(userId).select(
+    "name email createdAt isActive"
+  );
+
+  if (!user || !user.isActive) {
+    throw new AppError("User not found", 404);
+  }
+
+  res.status(200).json({
+    success: true,
+    user: {
+      id: user._id.toString(),
+      name: user.name,
+      email: user.email,
+      createdAt: user.createdAt,
+    },
+  });
 }
